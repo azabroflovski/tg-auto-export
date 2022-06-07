@@ -1,6 +1,10 @@
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, ipcRenderer, dialog } from 'electron'
 import { release } from 'os'
-import { join } from 'path'
+import { join, basename } from 'path'
+import { useBot } from './bot'
+import { InputFile } from 'grammy'
+import glob from 'fast-glob'
+import normalizePath from 'normalize-path'
 
 // Disable GPU Acceleration for Windows 7
 if (release().startsWith('6.1')) app.disableHardwareAcceleration()
@@ -18,12 +22,17 @@ let win: BrowserWindow | null = null
 
 async function createWindow() {
   win = new BrowserWindow({
-    title: 'Main window',
+    title: 'App Window',
+    minWidth: 460,
+    maxWidth: 460,
+    width: 460,
+
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
       nodeIntegration: true,
       contextIsolation: false,
     },
+    autoHideMenuBar: true
   })
 
   if (app.isPackaged) {
@@ -45,6 +54,63 @@ async function createWindow() {
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https:')) shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+
+
+  ipcMain.on('openDirectoryDialog', (event) => {
+    const response = dialog.showOpenDialogSync({
+      properties: ['openDirectory']
+    })
+
+    if (response) {
+      event.reply('updateSettings', { exportDirectory: response[0] })
+    }
+  })
+
+  let tgBroadcastIds = null
+  function createSyncWithTelegram({ exportInterval, exportDirectory, telegramBotToken }) {
+    return setInterval(() => {
+      sendFiles(exportDirectory, telegramBotToken)
+    }, exportInterval * 60000)
+  }
+
+  function sendFiles(directory, telegramBotToken) {
+    const filesList = glob.sync(normalizePath(directory) + '/*')
+    const { bot } = useBot(telegramBotToken)
+
+    if (filesList.length) {
+      filesList.forEach((file, index) => {
+        setTimeout(async () => {
+          try {
+            await bot.api.sendDocument(tgBroadcastIds, new InputFile(file))
+
+            win?.webContents.send('fileSend', {
+              fileName: basename(file),
+              filePath: file,
+              sendTime: Date.now(),
+              isError: false
+            })
+          } catch (error) {
+            win?.webContents.send('fileSend', {
+              fileName: basename(file),
+              filePath: file,
+              sendTime: Date.now(),
+              isError: true
+            })
+          }
+        }, 2000 * index)
+      })
+    }
+  }
+
+  let syncInterval = null
+
+  ipcMain.on('syncWithTelegram', (event, { exportDirectory, exportInterval, telegramBotToken, telegramBotBroadcastIds }) => {
+    clearInterval(syncInterval)
+    tgBroadcastIds = telegramBotBroadcastIds
+    syncInterval = createSyncWithTelegram({ exportInterval, exportDirectory, telegramBotToken })
+
   })
 }
 
